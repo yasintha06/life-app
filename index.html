@@ -496,7 +496,7 @@ const fmtMonth=ym=>pd(ym+"-01").toLocaleDateString("en-GB",{month:"long",year:"n
 const addMonths=(ym,n)=>{let[y,m]=ym.split("-").map(Number);m+=n;while(m<1){m+=12;y--}while(m>12){m-=12;y++}return`${y}-${String(m).padStart(2,"0")}`};
 
 /* ---------- State ---------- */
-const COLLS=["accounts","shifts","payments","loans","entries","tasks","habits","days","jobs","study","reviews","settings"];
+const COLLS=["accounts","shifts","payments","loans","entries","tasks","habits","days","jobs","study","reviews","marketing","settings"];
 const S={};COLLS.forEach(c=>S[c]=[]);
 const loaded=new Set();
 const ready=()=>loaded.size>=COLLS.length;
@@ -665,12 +665,22 @@ document.addEventListener("keydown",e=>{if(e.key==="Escape"&&!$("sheet").hidden)
 const col=(...c)=>h("div",{style:"display:flex;flex-direction:column;gap:12px"},...c);
 
 /* =================== TODAY =================== */
+/* Tasks: one-off tasks carry over to today if not done; "daily" tasks show every day from their start date and are ticked per day. */
+function tasksOn(d){return S.tasks.filter(t=>t.repeat==="daily"?t.date<=d:t.date===d).map(t=>t.repeat==="daily"?{...t,date:d,done:!!(t.doneOn&&t.doneOn[d])}:t)}
+function toggleTask(t){const orig=docOf("tasks",t.id);if(!orig)return;
+  if(orig.repeat==="daily")return wMerge("tasks/"+t.id,{doneOn:{...(orig.doneOn||{}),[t.date]:!t.done}},(t.done?"Not done: ":"Done: ")+t.text);
+  return wMerge("tasks/"+t.id,{done:!t.done},(t.done?"Not done: ":"Done: ")+t.text)}
+let rolled=false;
+async function rollover(){
+  if(rolled||!db||!canWrite)return;rolled=true;
+  for(const t of S.tasks.filter(t=>t.repeat!=="daily"&&!t.done&&t.date<today)){const{id,...r}=t;await rawSet("tasks/"+id,{...r,date:today,movedFrom:t.movedFrom||t.date})}
+}
 function dayInfo(d){const x=getLocal("days/"+d)||{};return{wake:x.wake||dayS.wake,bed:x.bed||dayS.bed}}
 function viewToday(){
   const d=dayView,{wake,bed}=dayInfo(d);
   const sh=S.shifts.filter(s=>s.date===d&&!JOBS[s.job]?.off);
   const off=S.shifts.some(s=>s.date===d&&JOBS[s.job]?.off);
-  const tk=S.tasks.filter(t=>t.date===d).sort((a,b)=>(a.time||"99")<(b.time||"99")?-1:(a.time||"99")>(b.time||"99")?1:0);
+  const tk=tasksOn(d).sort((a,b)=>(a.time||"99")<(b.time||"99")?-1:(a.time||"99")>(b.time||"99")?1:0);
   const plan=dayPlan(sh,tk,wake,bed,settings.travel);
   const hb=getLocal("habits/"+d)||{};
   const out=[];
@@ -711,8 +721,8 @@ function viewToday(){
   });
   const taskLi=t=>h("li",{class:t.done?"done":""},
     h("span",{class:"tm"},t.time||""),
-    h("button",{class:"check",type:"button","aria-pressed":t.done?"true":"false","aria-label":(t.done?"Mark not done: ":"Mark done: ")+t.text,onclick:()=>wMerge("tasks/"+t.id,{done:!t.done},(t.done?"Not done: ":"Done: ")+t.text)},t.done?"✓":""),
-    h("span",{class:"tx"},h("button",{type:"button",onclick:()=>openTask(d,t)},h("span",{},t.text)),h("small",{},[t.mins?hm(t.mins):"",t.tag&&t.tag!=="Personal"?t.tag:""].filter(Boolean).join(" · "))));
+    h("button",{class:"check",type:"button","aria-pressed":t.done?"true":"false","aria-label":(t.done?"Mark not done: ":"Mark done: ")+t.text,onclick:()=>toggleTask(t)},t.done?"✓":""),
+    h("span",{class:"tx"},h("button",{type:"button",onclick:()=>openTask(d,t)},h("span",{},t.text)),h("small",{},[t.repeat==="daily"?"Every day":"",t.movedFrom&&!t.done?"Carried over from "+fmtShort(t.movedFrom):"",t.mins?hm(t.mins):"",t.tag&&t.tag!=="Personal"?t.tag:""].filter(Boolean).join(" · "))));
   tk.filter(t=>t.time).forEach(t=>items.push({t:t.time,el:taskLi(t)}));
   let bedSet=toMin(bed);if(bedSet<=plan.wakeM)bedSet+=1440;
   const bedShown=fromMin(plan.endM),late=plan.endM>bedSet;
@@ -742,12 +752,15 @@ function openTask(date,ex){
   const tx=inp("k-text",ex?.text||"",{maxlength:"120"}),dt=inp("k-date",ex?.date||date,{type:"date"});
   const tm=inp("k-time",ex?.time||"",{type:"time"}),mi=inp("k-mins",ex?.mins??30,{inputmode:"numeric"});
   const tg=sel("k-tag",TAGS,ex?.tag||"Personal");
-  const body=col(field("Task",tx),h("div",{class:"two"},field("Date",dt),field("Time (optional)",tm)),h("div",{class:"two"},field("Rough minutes",mi),field("Tag",tg)));
+  const rp=sel("k-rep",[["","Just once (moves to the next day if not done)"],["daily","Every day"]],docOf("tasks",ex?.id)?.repeat||"");
+  const body=col(field("Task",tx),h("div",{class:"two"},field("Date",dt),field("Time (optional)",tm)),h("div",{class:"two"},field("Rough minutes",mi),field("Tag",tg)),field("Repeat",rp));
   const acts=[h("button",{class:"btn",type:"button",onclick:async()=>{
     const v=tx.value.trim();if(!v){err.textContent="Write the task.";return}
     if(!dt.value){err.textContent="Pick a date.";return}
     const m=num(mi.value);if(Number.isNaN(m)||(m!==null&&m<0)){err.textContent="Minutes must be a number.";return}
-    const data={date:dt.value,text:v,time:tm.value||"",mins:m||0,tag:tg.value,done:ex?.done||false};
+    const orig=ex?docOf("tasks",ex.id):null;
+    const data={...(orig?stripId(orig):{}),date:rp.value==="daily"&&orig?.repeat==="daily"?orig.date:dt.value,text:v,time:tm.value||"",mins:m||0,tag:tg.value,repeat:rp.value,done:rp.value==="daily"?false:(orig?.repeat==="daily"?false:(orig?.done||false))};
+    if(rp.value==="daily")data.doneOn=orig?.doneOn||{};else delete data.doneOn;
     const ok=ex?await wSet("tasks/"+ex.id,data,"Task: "+v):await wAdd("tasks",data,"Task: "+v);
     if(ok)closeSheet();
   }},ex?"Save":"Add task"),h("button",{class:"btn ghost",type:"button",onclick:closeSheet},"Cancel")];
@@ -756,19 +769,19 @@ function openTask(date,ex){
 }
 function viewWeek(){
   const days=[...Array(7)].map((_,i)=>addDays(weekView,i));
-  const tk=S.tasks.filter(t=>days.includes(t.date));
+  const tk=days.flatMap(tasksOn);
   const habitDays=k=>S.habits.filter(x=>days.includes(x.id)&&x[k]).length;
   const out=[monthNav(`${fmtShort(days[0])} – ${fmtShort(days[6])}`,()=>{weekView=addDays(weekView,-7);render(true)},()=>{weekView=addDays(weekView,7);render(true)}),
     h("div",{class:"tiles"},vtile("Tasks done",`${tk.filter(t=>t.done).length} of ${tk.length}`),vtile("Meditation",`${habitDays("med")} of 7 days`),vtile("Reading",`${habitDays("read")} of 7 days`))];
   const wk=h("div",{class:"week"});
   days.forEach(d=>{
     const sh=S.shifts.filter(s=>s.date===d);
-    const ts=S.tasks.filter(t=>t.date===d).sort((a,b)=>(a.time||"99")<(b.time||"99")?-1:1);
+    const ts=tasksOn(d).sort((a,b)=>(a.time||"99")<(b.time||"99")?-1:1);
     const ents=h("div",{class:"ents"});
     sh.forEach(s=>ents.append(h("button",{class:"entry",type:"button",onclick:()=>openShift(d,s)},h("b",{},JOBS[s.job]?.label||s.job),
       JOBS[s.job]?.sam&&s.start?h("span",{},`${realStart(s)}–${realEnd(s)} · leave ${leaveAt(realStart(s),settings.travel)}`):null)));
     ts.forEach(t=>ents.append(h("div",{style:"display:flex;gap:8px;align-items:center"},
-      h("button",{class:"check",type:"button","aria-pressed":t.done?"true":"false","aria-label":"Done: "+t.text,onclick:()=>wMerge("tasks/"+t.id,{done:!t.done},(t.done?"Not done: ":"Done: ")+t.text)},t.done?"✓":""),
+      h("button",{class:"check",type:"button","aria-pressed":t.done?"true":"false","aria-label":"Done: "+t.text,onclick:()=>toggleTask(t)},t.done?"✓":""),
       h("button",{class:"lnk",type:"button",style:"color:var(--ink);font-weight:400;"+(t.done?"text-decoration:line-through;color:var(--muted)":""),onclick:()=>openTask(d,t)},(t.time?t.time+" ":"")+t.text))));
     if(!sh.length&&!ts.length)ents.append(h("span",{class:"none"},"Nothing planned"));
     if(canWrite)ents.append(h("div",{class:"btns"},h("button",{class:"btn ghost small",type:"button",onclick:()=>openTask(d)},"+ Task"),h("button",{class:"btn ghost small",type:"button",onclick:()=>{dayView=d;go("today")}},"Open day")));
@@ -1213,11 +1226,11 @@ function viewBiz(){
   BIZ.slice(1).forEach(b=>{
     const m=bizTotals(S.entries,b,mm),all=bizTotals(S.entries,b,null);
     const list=S.entries.filter(e=>(e.biz||"Personal")===b&&monthOf(e.date)===mm).sort((x,y)=>x.date<y.date?1:-1);
-    const tasks=S.tasks.filter(t=>t.tag===b&&!t.done).sort((x,y)=>x.date<y.date?-1:1);
+    const tasks=S.tasks.filter(t=>t.tag===b&&!t.done&&t.repeat!=="daily").sort((x,y)=>x.date<y.date?-1:1);
     out.push(h("div",{class:"card"},h("h2",{},b),
       h("div",{class:"tiles"},vtile("Income",fmtP(m.inc)),vtile("Costs",fmtP(m.cost),m.lkr?fmtRs(m.lkr):null),vtile("Profit",fmtP(m.profit))),
       h("div",{class:"meta"},`All time: income ${fmtP(all.inc)} · costs ${fmtP(all.cost)}${all.lkr?" ("+fmtRs(all.lkr)+")":""} · profit ${fmtP(all.profit)}`),
-      canWrite?h("div",{class:"btns"},h("button",{class:"btn small",type:"button",onclick:()=>openEntry("expense",{biz:b,cat:"Business"})},"+ Cost"),h("button",{class:"btn small ghost",type:"button",onclick:()=>openEntry("income",{biz:b,cat:"Business"})},"+ Income")):null,
+      canWrite?h("div",{class:"btns"},h("button",{class:"btn small",type:"button",onclick:()=>openEntry("expense",{biz:b,cat:"Business"})},"+ Cost"),h("button",{class:"btn small ghost",type:"button",onclick:()=>openEntry("income",{biz:b,cat:"Business"})},"+ Income"),b==="Zeilan Paradise"?h("button",{class:"btn small ghost",type:"button",onclick:()=>go("marketing")},"Marketing plan"):null):null,
       list.length?h("ul",{class:"list"},list.map(entryRow)):h("div",{class:"meta"},"Nothing this month."),
       tasks.length?h("details",{},h("summary",{},`Open tasks (${tasks.length})`),h("ul",{class:"list",style:"margin-top:8px"},tasks.slice(0,15).map(t=>h("li",{},h("button",{class:"row",type:"button",onclick:()=>openTask(t.date,t)},h("div",{class:"name"},t.text,h("div",{class:"hint"},fmtDay(t.date))),h("span",{class:"lnk"},"Edit")))))):null));
   });
@@ -1361,7 +1374,7 @@ function viewReview(){
   const recv=sum(S.payments.filter(p=>inW(p.date)).map(p=>toP(p.amount)))+sum(S.entries.filter(e=>e.kind==="income"&&inW(e.date)).map(e=>toP(e.amount)));
   const spent=sum(S.entries.filter(e=>e.kind==="expense"&&inW(e.date)).map(e=>toP(e.amount)));
   const sl=S.entries.filter(e=>e.kind==="expense"&&e.cat==="Sri Lanka"&&inW(e.date));
-  const tk=S.tasks.filter(t=>inW(t.date));
+  const tk=days.flatMap(tasksOn);
   const hab=k=>S.habits.filter(x=>inW(x.id)&&x[k]).length;
   const rv=getLocal("reviews/"+ws)||{};
   const ta=(k,label)=>{const t=h("textarea",{id:"rv-"+k,rows:"3","aria-label":label});t.value=rv[k]||"";if(!canWrite)t.disabled=true;
@@ -1438,13 +1451,55 @@ function viewSettings(){
   return[body,window.lifeSignOut?h("button",{class:"btn ghost",type:"button",onclick:window.lifeSignOut},"Sign out"):null,h("div",{class:"meta"},"Never type card numbers, sort codes or account numbers into this app. Names and balances are enough.")];
 }
 
+/* =================== MARKETING =================== */
+const MK_NUMS=[["emails","Emails sent","5 to 10",5],["replies","Replies received","2 or more",2],["conns","New LinkedIn connections","15",15],["calls","Calls or meetings booked","1 a month",0],["visits","Website visits","Rising each month",0]];
+const MK_CHECK=["I sent this week's follow-up emails","I made 3 to 5 new LinkedIn connections a day (at least 15 this week)","I posted once or twice on LinkedIn","I commented on 5 or more posts","I replied to every message within a day"];
+const MK_RULES=["Say \"preparing\" and \"launching in 2027\". Don't say \"we operate\" or \"book now\".","Don't claim a licence, a team, an office in Colombo, past tours, clients or reviews you don't have.","No fixed prices, car numbers or group sizes until you've worked them out.","Asked about registration? \"Our SLTDA registration is in progress, and I will confirm everything in writing before any booking.\"","Don't take money or promise rates until you have the SLTDA provisional certificate.","Reply to every comment and message politely, within a day."];
+const MK_GUIDE="https://claude.ai/artifact/KKsyhXDanb8aQuSkhJ4JYU";
+let mkWs=weekStart(today);
+function viewMarketing(){
+  const ws=mkWs,days=[...Array(7)].map((_,i)=>addDays(ws,i)),d=getLocal("marketing/"+ws)||{};
+  const out=[monthNav(`${fmtShort(days[0])} – ${fmtShort(days[6])}`,()=>{mkWs=addDays(mkWs,-7);render(true)},()=>{mkWs=addDays(mkWs,7);render(true)})];
+  const all=S.marketing,tot=k=>sum(all.map(x=>x[k]));
+  const te=tot("emails"),tr=tot("replies");
+  out.push(h("div",{class:"tiles"},vtile("Emails sent",String(te),"All weeks"),vtile("Replies",String(tr),te?Math.round(tr/te*100)+"% reply rate":null),vtile("New connections",String(tot("conns"))),vtile("Calls booked",String(tot("calls")))));
+  const tk=days.flatMap(tasksOn).filter(t=>t.tag==="Zeilan Paradise").sort((a,b)=>a.date<b.date?-1:1);
+  const tc=h("div",{class:"card"},h("h2",{},"This week's tasks"),h("div",{class:"meta"},"15 to 30 minutes each. Missed one? Skip it and carry on."));
+  if(!tk.length)tc.append(h("div",{class:"meta"},"No plan tasks this week."));
+  tk.forEach(t=>tc.append(h("div",{style:"display:flex;gap:10px;align-items:flex-start"},
+    h("button",{class:"check",type:"button","aria-pressed":t.done?"true":"false","aria-label":"Done: "+t.text,onclick:()=>toggleTask(t)},t.done?"✓":""),
+    h("div",{style:"flex:1;min-width:0"},h("button",{class:"lnk",type:"button",style:"color:var(--ink);font-weight:400;"+(t.done?"text-decoration:line-through;color:var(--muted)":""),onclick:()=>openTask(t.date,t)},t.text),h("div",{class:"hint"},fmtDay(t.date))))));
+  out.push(tc);
+  const ck=d.checks||{};
+  const cc=h("div",{class:"card"},h("h2",{},"Sunday checklist"),h("div",{class:"meta"},`${MK_CHECK.filter((_,i)=>ck[i]).length} of ${MK_CHECK.length} done`));
+  MK_CHECK.forEach((c,i)=>cc.append(h("div",{class:"topic"},h("button",{class:"check",type:"button","aria-pressed":ck[i]?"true":"false","aria-label":c,onclick:()=>wMerge("marketing/"+ws,{checks:{...ck,[i]:!ck[i]}},"Marketing checklist")},ck[i]?"✓":""),h("span",{},c))));
+  out.push(cc);
+  const nc=h("div",{class:"card"},h("h2",{},"Numbers this week"),h("div",{class:"meta"},"Five minutes every Sunday. Tap a number to change it."));
+  MK_NUMS.forEach(([k,label,goal,g])=>{
+    const v=Number(d[k])||0;
+    const i2=h("input",{type:"text",inputmode:"numeric","aria-label":label,value:String(v)});if(!canWrite)i2.disabled=true;
+    i2.addEventListener("change",()=>{const n=num(i2.value);if(n===null||Number.isNaN(n)||n<0){setStatus("Enter a whole number.",true);return}wMerge("marketing/"+ws,{[k]:Math.round(n)},label)});
+    i2.addEventListener("keydown",e=>{if(e.key==="Enter")i2.blur()});
+    const bump=n=>h("button",{class:"btn small ghost",type:"button","aria-label":(n>0?"Add one to ":"Take one from ")+label,onclick:()=>wMerge("marketing/"+ws,{[k]:Math.max(0,v+n)},label)},n>0?"+1":"−1");
+    nc.append(h("div",{class:"owedrow"},h("div",{style:"flex:1;min-width:8rem"},label,h("div",{class:"hint"},"Goal: "+goal+(g&&v>=g?" · reached":""))),
+      h("div",{class:"btns",style:"align-items:center"},canWrite?bump(-1):null,h("label",{class:"money",style:"width:4.5rem"},i2),canWrite?bump(1):null)));
+  });
+  out.push(nc);
+  const hist=all.filter(x=>x.id<ws).sort((a,b)=>a.id<b.id?1:-1).slice(0,8);
+  if(hist.length)out.push(h("h2",{},"Earlier weeks"),h("ul",{class:"list"},hist.map(x=>h("li",{},h("button",{class:"row",type:"button",onclick:()=>{mkWs=x.id;render(true)}},h("div",{class:"name"},"Week of "+fmtShort(x.id),h("div",{class:"hint"},`${x.emails||0} emails · ${x.replies||0} replies · ${x.conns||0} connections · ${x.calls||0} calls`)),h("span",{class:"lnk"},"Open"))))));
+  if(te>=10&&tr===0)out.push(h("div",{class:"card"},h("b",{},"No replies yet"),h("div",{class:"meta"},"If replies stay at zero for 3 weeks, change the email, not the number of emails. Ask someone you trust to read it.")));
+  out.push(h("details",{class:"card"},h("summary",{},"Honest rules for everything you post"),h("ul",{style:"margin:8px 0 0;padding-left:18px;display:flex;flex-direction:column;gap:6px"},MK_RULES.map(r=>h("li",{},r)))));
+  out.push(h("div",{class:"meta"},"Skip for now: paid ads, TikTok, paid courses, influencers and paid tools. ",h("a",{href:MK_GUIDE,target:"_blank",rel:"noopener"},"Open the full guide")));
+  return out;
+}
+
 /* =================== MORE =================== */
 const PAGES=[["today","Today","Plan, free time, habits"],["week","Week","Tasks and shifts by day"],["habits","Habits","Meditation and reading"],
   ["shifts","Shifts and Pay","Hours, Sam's pay check, Rob"],["money","Money","Spending, transfers, budgets"],["earnings","Earnings","What you received"],
   ["banks","Cash & Banks","Balances now"],["cards","Credit Cards","Owed, limits, due days"],["savings","Savings","In each bank"],
   ["owings","Lendings","Who owes who"],["budgets","Budgets","Monthly limits"],["biz","Businesses","Zeilan Paradise, Zeilan Apparel"],
   ["study","Cloud Studies","AZ-900, AZ-104, AZ-305"],["jobs","Job Applications","Company, role, status"],
-  ["review","Weekly Review","Your week in numbers"],["summary","Monthly Summary","Earned, spent, Sri Lanka"], ["backup","Backup","Download or restore"],["settings","Settings","Rates, times, book"]];
+  ["review","Weekly Review","Your week in numbers"],["summary","Monthly Summary","Earned, spent, Sri Lanka"], ["backup","Backup","Download or restore"],["settings","Settings","Rates, times, book"],["marketing","Marketing","Zeilan Paradise 4-week plan"]];
 function viewMore(){
   const out=[h("div",{class:"links"},PAGES.map(([k,t,s])=>h("button",{class:"link",type:"button",onclick:()=>go(k)},h("b",{},t),h("small",{},s))))];
   if(UNDO.length)out.push(h("div",{class:"card"},h("h2",{},"Recent changes"),h("ul",{class:"list"},UNDO.slice(-8).reverse().map(u=>h("li",{class:"row"},h("div",{class:"name"},u.label)))),
@@ -1459,7 +1514,7 @@ try{const c=JSON.parse(localStorage.getItem("lifeChat")||"[]");if(Array.isArray(
 const saveChat=()=>{try{localStorage.setItem("lifeChat",JSON.stringify(CHAT.filter(m=>m.role!=="act"||true).slice(-30)))}catch(e){}};
 function chatContext(){
   const t=totals(),ow=owedToYou(),ws=weekStart(today);
-  const near=S.tasks.filter(x=>x.date>=addDays(today,-3)&&x.date<=addDays(today,10)).map(x=>`${x.id}|${x.date}|${x.time||"-"}|${x.done?"done":"todo"}|${x.text}`).join("\n")||"none";
+  const near=S.tasks.filter(x=>x.repeat==="daily"||(x.date>=addDays(today,-3)&&x.date<=addDays(today,10))).map(x=>x.repeat==="daily"?`${x.id}|every day|${x.time||"-"}|${x.doneOn&&x.doneOn[today]?"done today":"todo today"}|${x.text}`:`${x.id}|${x.date}|${x.time||"-"}|${x.done?"done":"todo"}|${x.text}`).join("\n")||"none";
   const sh=S.shifts.filter(s=>s.date>=addDays(ws,-7)&&s.date<=addDays(ws,13)).map(s=>`${s.id}|${s.date}|${s.job}|${s.start||"-"}|${s.hours||"-"}h|${s.amount!=null?"£"+s.amount:""}`).join("\n")||"none";
   const keys=ALLKEYS().map(([k,l])=>`${k} = ${l}${isCard(k)?"":" (now "+fmtP(nowP(k))+")"}`).join("\n");
   return `You are the assistant inside Yasintha's personal life app. Today is ${fmtLong(today)} (${today}). Weeks run Monday to Sunday.
@@ -1517,14 +1572,14 @@ const TOOLS=[
    async execute(i){const s=docOf("shifts",str(i.shift_id));if(!s||!JOBS[s.job]?.side)throw new Error("no side job with that id");
      const amount=nOrNull(i.amount)??Number(s.amount);if(!(amount>0))throw new Error("amount needed");
      await must(wSet("payments/job-"+s.id,{source:"job",ref:s.id,account:str(i.to)?needKey(i.to,["cash","bank"]):"cash",amount,date:needDate(i.date)},`${JOBS[s.job].label} paid`));actNote(`${JOBS[s.job].label} marked paid`);return{ok:true}}},
-  {name:"add_task",description:"Add a to-do task to a day. time HH:MM optional, mins rough length.",
-   inputSchema:{type:"object",properties:{date:{type:"string"},text:{type:"string"},time:{type:"string"},mins:{type:"number"},tag:{type:"string",enum:TAGS}},required:["text"]},
-   async execute(i){const text=str(i.text);if(!text)throw new Error("text needed");const data={date:needDate(i.date),text:text.slice(0,120),time:/^\d{2}:\d{2}$/.test(str(i.time))?str(i.time):"",mins:nOrNull(i.mins)??30,tag:TAGS.includes(i.tag)?i.tag:"Personal",done:false};
+  {name:"add_task",description:"Add a to-do task to a day. time HH:MM optional, mins rough length. every_day true makes it repeat daily from that date (it is never carried over). One-off tasks not done move to the next day automatically.",
+   inputSchema:{type:"object",properties:{date:{type:"string"},text:{type:"string"},time:{type:"string"},mins:{type:"number"},tag:{type:"string",enum:TAGS},every_day:{type:"boolean"}},required:["text"]},
+   async execute(i){const text=str(i.text);if(!text)throw new Error("text needed");const data={date:needDate(i.date),text:text.slice(0,120),time:/^\d{2}:\d{2}$/.test(str(i.time))?str(i.time):"",mins:nOrNull(i.mins)??30,tag:TAGS.includes(i.tag)?i.tag:"Personal",done:false,repeat:i.every_day?"daily":""};if(i.every_day)data.doneOn={};
      const id=await must(wAdd("tasks",data,"Task: "+text));actNote(`Task "${text}" on ${fmtDay(data.date)}`);return{ok:true,id}}},
-  {name:"update_task",description:"Change a task by id: mark done or not, move date or time, rename.",
+  {name:"update_task",description:"Change a task by id: mark done or not (for an every-day task, date says which day), move date or time, rename.",
    inputSchema:{type:"object",properties:{id:{type:"string"},done:{type:"boolean"},date:{type:"string"},time:{type:"string"},text:{type:"string"}},required:["id"]},
    async execute(i){const t=docOf("tasks",str(i.id));if(!t)throw new Error("no task with that id");const p={};
-     if(typeof i.done==="boolean")p.done=i.done;if(str(i.date))p.date=needDate(i.date);if(i.time!=null)p.time=str(i.time);if(str(i.text))p.text=str(i.text);
+     if(typeof i.done==="boolean"){if(t.repeat==="daily"){const d=needDate(i.date);p.doneOn={...(t.doneOn||{}),[d]:i.done}}else p.done=i.done}if(str(i.date)&&t.repeat!=="daily")p.date=needDate(i.date);if(i.time!=null)p.time=str(i.time);if(str(i.text))p.text=str(i.text);
      await must(wMerge("tasks/"+t.id,p,"Task: "+t.text));actNote(`Updated "${t.text}"`);return{ok:true}}},
   {name:"delete_task",description:"Delete a task by id (undoable).",inputSchema:{type:"object",properties:{id:{type:"string"}},required:["id"]},
    async execute(i){const t=docOf("tasks",str(i.id));if(!t)throw new Error("no task with that id");await must(wDel("tasks/"+t.id,"Deleted task: "+t.text));actNote(`Deleted "${t.text}"`);return{ok:true}}},
@@ -1542,6 +1597,10 @@ const TOOLS=[
      const id=await must(wAdd("jobs",data,"Application: "+data.company));actNote(`Application: ${data.company}`);return{ok:true,id}}},
   {name:"log_study",description:"Log Azure study time. cert az900, az104 or az305.",inputSchema:{type:"object",properties:{date:{type:"string"},minutes:{type:"number"},cert:{type:"string",enum:Object.keys(STUDY)},note:{type:"string"}},required:["minutes"]},
    async execute(i){const data={date:needDate(i.date),mins:needAmt(i.minutes),cert:STUDY[i.cert]?i.cert:"az900",note:str(i.note)};const id=await must(wAdd("study",data,`Studied ${hm(data.mins)}`));actNote(`Studied ${hm(data.mins)}`);return{ok:true,id}}},
+  {name:"log_marketing",description:"Add to this week's Zeilan Paradise marketing numbers (adds to what is there). Fields: emails sent, replies received, new LinkedIn connections, calls or meetings booked, website visits.",
+   inputSchema:{type:"object",properties:{date:{type:"string"},emails:{type:"number"},replies:{type:"number"},conns:{type:"number"},calls:{type:"number"},visits:{type:"number"}}},
+   async execute(i){const ws=weekStart(needDate(i.date)),cur=getLocal("marketing/"+ws)||{},p={};for(const k of ["emails","replies","conns","calls","visits"]){const n=nOrNull(i[k]);if(n)p[k]=Math.max(0,(Number(cur[k])||0)+Math.round(n))}
+     if(!Object.keys(p).length)throw new Error("give at least one number");await must(wMerge("marketing/"+ws,p,"Marketing numbers"));actNote("Marketing numbers updated");return{ok:true,week:ws,now:{...cur,...p}}}},
   {name:"undo_last",description:"Undo the most recent change made in the app (by him or by you).",
    async execute(){const l=await undoLast();if(!l)throw new Error("nothing to undo");actNote("Undid: "+l);return{ok:true,undone:l}}}
 ];
@@ -1590,13 +1649,13 @@ async function sendChat(){
 
 /* =================== APP SHELL =================== */
 const VIEWS={today:viewToday,week:viewWeek,habits:viewHabits,shifts:viewShifts,money:viewMoney,banks:viewBanks,cards:viewCards,savings:viewSavings,earnings:viewEarnings,
-  budgets:viewBudgets,biz:viewBiz,owings:viewOwings,study:viewStudy,jobs:viewJobs,review:viewReview,summary:viewSummary,backup:viewBackup,settings:viewSettings,more:viewMore,chat:viewChat};
+  budgets:viewBudgets,biz:viewBiz,owings:viewOwings,study:viewStudy,jobs:viewJobs,review:viewReview,summary:viewSummary,backup:viewBackup,marketing:viewMarketing,settings:viewSettings,more:viewMore,chat:viewChat};
 const TITLES={today:["Today",""],week:["Week","Tasks and shifts, Monday to Sunday"],habits:["Habits","Last 4 weeks"],shifts:["Shifts and Pay","Weeks run Monday to Sunday"],
   money:["Money","Everything in pounds"],banks:["Cash and Banks","Cash in hand and your bank accounts"],cards:["Credit Cards","What you owe on each card"],
   savings:["Savings","Held in each bank"],earnings:["Earnings","Pay and income received"],budgets:["Budgets","Monthly spending limits"],
   biz:["Businesses","Zeilan Paradise and Zeilan Apparel"],owings:["Lendings and owings","Who owes you, and who you owe"],study:["Cloud Studies","Your Azure path"],
   jobs:["Job Applications","Every application in one list"],review:["Weekly Review","How the week went"],summary:["Monthly Summary","Your month in numbers"],
-  backup:["Backup","Keep your own copy"],settings:["Settings","Rates, times and habits"],more:["All pages",""],chat:["Assistant","Type it, and it's logged"]};
+  backup:["Backup","Keep your own copy"],settings:["Settings","Rates, times and habits"],marketing:["Marketing","Zeilan Paradise: replies from agents, not sales yet"],more:["All pages",""],chat:["Assistant","Type it, and it's logged"]};
 if(!VIEWS[tab])tab="today";if(!TABS.some(x=>x[0]===parent))parent="today";
 function go(t){
   if(!VIEWS[t])return;
@@ -1640,7 +1699,7 @@ render(true);
         const g=id=>stripId(S.settings.find(x=>x.id===id))||{};
         settings={...DEF,...g("pay")};dayS={...DAYDEF,...g("day")};budgets=g("budgets");const st=g("study");studyS={done:st.done||{},exam:st.exam||{}};
       }
-      loaded.add(c);if(ready())render();
+      loaded.add(c);if(ready()){render();if(!rolled)rollover()}
     },()=>{loaded.add(c);setStatus("Lost connection to your data. Reload the page.",true);render()});
   });
 })();

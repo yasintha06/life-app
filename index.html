@@ -1410,11 +1410,16 @@ function viewBackup(){
   const st=h("div",{class:"status"},restoreNote);
   const file=h("input",{type:"file",accept:".json,application/json","aria-label":"Backup file"});
   const restore=h("button",{class:"btn ghost",type:"button"},"Restore from file");
+  let picked=null;
+  file.onchange=async()=>{
+    picked=null;const f=file.files&&file.files[0];if(!f)return;
+    try{const d=JSON.parse(await f.text());
+      if(!d||d.app!=="my-life-app"||!d.data){restoreNote="That file isn't a backup from this app.";st.textContent=restoreNote;return}
+      picked=d;const c=COLLS.reduce((t,k)=>t+((d.data[k]||[]).length),0);restoreNote=`File loaded: ${c} items. Now tap Restore from file.`;st.textContent=restoreNote}
+    catch(e){restoreNote="That file isn't a valid backup.";st.textContent=restoreNote}
+  };
   restore.onclick=async()=>{
-    const f=file.files&&file.files[0];if(!f){st.textContent="Choose a backup file first.";return}
-    let data;try{data=JSON.parse(await f.text())}catch(e){st.textContent="That file isn't a valid backup.";return}
-    if(!data||data.app!=="my-life-app"||!data.data){st.textContent="That file isn't a backup from this app.";return}
-    if(restore.dataset.armed!=="1"){restore.dataset.armed="1";restore.textContent="Tap again to restore";st.textContent="This writes every item from the file back into the app. Items with the same id are replaced.";return}
+    const data=picked;if(!data){st.textContent="Choose a backup file first, then wait for 'File loaded'.";return}
     restore.disabled=true;let n=0,fail=0;restoreNote="Restoring… please wait";st.textContent=restoreNote;
     for(const c of COLLS){for(const d of(data.data[c]||[])){if(!d||!d.id)continue;const ok=await rawSet(c+"/"+d.id,stripId(d));ok?n++:fail++;if(n%20===0){restoreNote=`Restoring… ${n}`;st.textContent=restoreNote}}}
     restoreNote=`Restored ${n} items${fail?`, ${fail} failed`:""}. Check Today, Shifts and Money.`;st.textContent=restoreNote;document.querySelectorAll(".status").forEach(e=>e.textContent=restoreNote);restore.disabled=false;

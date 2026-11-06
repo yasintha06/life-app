@@ -1,0 +1,133 @@
+<style>
+.gate{position:fixed;inset:0;z-index:60;background:var(--bg);overflow:auto;display:flex;align-items:flex-start;justify-content:center;
+  padding:max(40px,env(safe-area-inset-top,0px)) max(16px,env(safe-area-inset-right,0px)) 40px max(16px,env(safe-area-inset-left,0px));box-sizing:border-box}
+.gcard{width:100%;max-width:420px;display:flex;flex-direction:column;gap:14px}
+.gcard p{margin:0;color:var(--muted);font-size:.92rem}
+.gcard .row2{display:flex;gap:8px;flex-wrap:wrap}
+</style>
+<div class="gate" id="gate">
+  <div class="gcard">
+    <h1>My Life App</h1>
+    <div class="status" id="g-msg" role="status">Loading…</div>
+    <div id="g-setup" class="card" hidden>
+      <h2>Connect your database</h2>
+      <p>Paste the two values from Supabase: Project Settings › API Keys (the Project URL, and the publishable key or the anon public key). You only do this once on each device.</p>
+      <label class="field">Project URL<input id="g-url" placeholder="https://xxxx.supabase.co" autocomplete="off" inputmode="url"></label>
+      <label class="field">Publishable key<input id="g-key" placeholder="sb_publishable_… or eyJ…" autocomplete="off"></label>
+      <p>Never paste a secret or service_role key here.</p>
+      <button class="btn" type="button" id="g-save">Save</button>
+    </div>
+    <div id="g-login" class="card" hidden>
+      <h2>Sign in</h2>
+      <label class="field">Email<input id="g-email" type="email" autocomplete="email"></label>
+      <label class="field">Password<input id="g-pass" type="password" autocomplete="current-password" minlength="8"></label>
+      <div class="row2"><button class="btn" type="button" id="g-in">Sign in</button><button class="btn ghost" type="button" id="g-up">Create account</button></div>
+      <button class="lnk" type="button" id="g-reset">Change database settings</button>
+    </div>
+  </div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js"></script>
+<script>
+/* Standalone data layer: gives the app the same db calls it used inside Claude, backed by Supabase. */
+(function(){
+  window.LIFE_STANDALONE=true;
+  let resolveDb;const dbReady=new Promise(r=>{resolveDb=r});
+  window.claude={use:async k=>k==="db"?dbReady:k==="user"?{can:async()=>true}:null};
+  const g=id=>document.getElementById(id);
+  const msg=(t,err)=>{const m=g("g-msg");m.textContent=t;m.className="status"+(err?" err":"")};
+  let cfg=null;try{cfg=JSON.parse(localStorage.getItem("lifeCfg")||"null")}catch(e){}
+  let sb=null,uid=null,entered=false;
+
+  function showSetup(){g("g-setup").hidden=false;g("g-login").hidden=true;msg("");if(cfg){g("g-url").value=cfg.url;g("g-key").value=cfg.key}}
+  function showLogin(){g("g-setup").hidden=true;g("g-login").hidden=false;msg("")}
+  g("g-save").onclick=()=>{
+    const url=g("g-url").value.trim().replace(/\/+$/,""),key=g("g-key").value.trim();
+    if(!/^https:\/\/[a-z0-9-]+\.supabase\.co$/i.test(url)){msg("The URL should look like https://xxxx.supabase.co",true);return}
+    if(key.length<30){msg("That key looks too short.",true);return}
+    if(/^sb_secret_/.test(key)){msg("That's a secret key. Use the publishable (or anon public) key instead.",true);return}
+    try{const p=JSON.parse(atob(key.split(".")[1].replace(/-/g,"+").replace(/_/g,"/")));if(p.role==="service_role"){msg("That's the service_role key. Use the anon public key instead.",true);return}}catch(e){}
+    cfg={url,key};try{localStorage.setItem("lifeCfg",JSON.stringify(cfg))}catch(e){}
+    start();
+  };
+  g("g-reset").onclick=showSetup;
+  g("g-in").onclick=async()=>{
+    const email=g("g-email").value.trim(),password=g("g-pass").value;
+    if(!email||!password){msg("Enter your email and password.",true);return}
+    msg("Signing in…");
+    const{data,error}=await sb.auth.signInWithPassword({email,password});
+    if(error){msg(error.message==="Email not confirmed"?"Confirm your email first: check your inbox.":"Couldn't sign in: "+error.message,true);return}
+    enter(data.user);
+  };
+  g("g-up").onclick=async()=>{
+    const email=g("g-email").value.trim(),password=g("g-pass").value;
+    if(!email||password.length<8){msg("Enter your email and a password of at least 8 characters.",true);return}
+    msg("Creating your account…");
+    const{data,error}=await sb.auth.signUp({email,password,options:{emailRedirectTo:location.href.split("#")[0].split("?")[0]}});
+    if(error){msg("Couldn't create the account: "+error.message,true);return}
+    if(data.session)enter(data.user);else msg("Check your email and tap the confirm link. Then come back and sign in.");
+  };
+  window.lifeSignOut=async()=>{try{await sb.auth.signOut()}catch(e){}location.reload()};
+
+  async function start(){
+    if(!window.supabase||!window.supabase.createClient){msg("Couldn't load. Check your internet and reload.",true);return}
+    if(!cfg){showSetup();return}
+    try{sb=window.supabase.createClient(cfg.url,cfg.key,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:true}})}
+    catch(e){msg("Those database settings don't work. Check them.",true);showSetup();return}
+    sb.auth.onAuthStateChange((ev,session)=>{if(session&&!entered)enter(session.user)});
+    const{data}=await sb.auth.getSession();
+    if(data&&data.session)enter(data.session.user);else showLogin();
+  }
+  async function enter(user){
+    if(entered)return;entered=true;uid=user.id;msg("Loading your data…");
+    try{const db=await makeDb();g("gate").hidden=true;resolveDb(db)}
+    catch(e){entered=false;msg("Couldn't reach your database. Did you run setup.sql? ("+(e.message||e)+")",true);showLogin()}
+  }
+
+  const SEED_ACCOUNTS=[["cash","cash","Cash",1],["lloyds","bank","Lloyds",2],["monzo","bank","Monzo",3],["barclays","bank","Barclays",4],["wise","bank","Wise",5],
+    ["monzo-flex","card","Monzo Flex",1,2900,15],["amex","card","Amex",2,2400,18],["aqua","card","Aqua",3,1200],["barclaycard","card","Barclaycard Platinum",4,750],
+    ["ocean","card","Ocean",5,300],["zable","card","Zable",6,200],["post-office","card","Post Office",7,200],["zilch","card","Zilch",8,80],["asda","card","Asda",9,null]];
+
+  async function makeDb(){
+    const cache={},L={};
+    const snapOf=c=>({docs:[...(cache[c]||new Map())].map(([id,d])=>({id,data:()=>JSON.parse(JSON.stringify(d))}))});
+    const emit=c=>(L[c]||[]).forEach(f=>{try{f(snapOf(c))}catch(e){console.error(e)}});
+    async function loadAll(){
+      let rows=[],from=0;
+      for(;;){const{data,error}=await sb.from("docs").select("coll,id,data").range(from,from+999);if(error)throw error;rows=rows.concat(data);if(data.length<1000)break;from+=1000}
+      Object.values(cache).forEach(m=>m.clear());
+      rows.forEach(r=>{(cache[r.coll]=cache[r.coll]||new Map()).set(r.id,r.data)});
+      return rows.length;
+    }
+    if(await loadAll()===0){
+      const rows=SEED_ACCOUNTS.map(([id,kind,name,order,limit,dueDay])=>({user_id:uid,coll:"accounts",id,
+        data:kind==="card"?{kind,name,order,limit:limit??null,dueDay:dueDay??null,owedStart:null}:kind==="bank"?{kind,name,order,start:null,savingsStart:null}:{kind,name,order,start:null}}));
+      rows.push({user_id:uid,coll:"settings",id:"pay",data:{samRate:10.4,robDay:75,travel:60}});
+      const{error}=await sb.from("docs").upsert(rows,{onConflict:"user_id,coll,id"});if(error)throw error;
+      await loadAll();
+    }
+    try{
+      sb.channel("docs-"+uid).on("postgres_changes",{event:"*",schema:"public",table:"docs",filter:"user_id=eq."+uid},p=>{
+        const r=p.eventType==="DELETE"?p.old:p.new;if(!r||!r.coll)return;
+        const m=cache[r.coll]=cache[r.coll]||new Map();
+        if(p.eventType==="DELETE")m.delete(r.id);else m.set(r.id,r.data);emit(r.coll);
+      }).subscribe();
+    }catch(e){}
+    document.addEventListener("visibilitychange",async()=>{if(document.visibilityState==="visible"){try{await loadAll();Object.keys(L).forEach(emit)}catch(e){}}});
+    const newId=()=>Math.random().toString(36).slice(2,10)+Date.now().toString(36);
+    function docRef(path){
+      const[c,id]=path.split("/");
+      const ref={id,path,
+        async set(d){const{error}=await sb.from("docs").upsert({user_id:uid,coll:c,id,data:d,updated_at:new Date().toISOString()},{onConflict:"user_id,coll,id"});if(error)throw error;(cache[c]=cache[c]||new Map()).set(id,JSON.parse(JSON.stringify(d)));emit(c)},
+        async update(p){const cur=(cache[c]&&cache[c].get(id))||{};return ref.set({...cur,...p})},
+        async delete(){const{error}=await sb.from("docs").delete().eq("coll",c).eq("id",id);if(error)throw error;if(cache[c])cache[c].delete(id);emit(c)},
+        async get(){const d=cache[c]&&cache[c].get(id);return{id,exists:!!d,data:()=>d}}};
+      return ref;
+    }
+    return{
+      collection:c=>({doc:id=>docRef(c+"/"+(id||newId())),onSnapshot(f){(L[c]=L[c]||[]).push(f);setTimeout(()=>f(snapOf(c)));return()=>{L[c]=L[c].filter(x=>x!==f)}}}),
+      doc:docRef
+    };
+  }
+  start();
+})();
+</script>

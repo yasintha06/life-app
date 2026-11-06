@@ -25,3 +25,7 @@ A single web page hosted free on GitHub Pages. Data lives in a free Supabase dat
 - Never put a `service_role` or `sb_secret_` key in the app or in this repo.
 - Download a backup now and then from **More › Backup**.
 - Free Supabase projects pause after about a week with no use. Open the Supabase dashboard and press **Restore** to wake it. Your data is kept.
+
+## Changing the app
+
+`src/app.html` is the app itself. `src/standalone-shim.html` adds the login and Supabase data layer. Run `python3 src/build.py` to rebuild `index.html`.

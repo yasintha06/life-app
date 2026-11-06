@@ -1257,9 +1257,10 @@ function viewSummary(){
 }
 
 /* =================== BACKUP & SETTINGS =================== */
+let restoreNote="";
 function viewBackup(){
   let last=null;try{last=localStorage.getItem("lifeBackup")}catch(e){}
-  const st=h("div",{class:"status"});
+  const st=h("div",{class:"status"},restoreNote);
   const file=h("input",{type:"file",accept:".json,application/json","aria-label":"Backup file"});
   const restore=h("button",{class:"btn ghost",type:"button"},"Restore from file");
   restore.onclick=async()=>{
@@ -1267,9 +1268,9 @@ function viewBackup(){
     let data;try{data=JSON.parse(await f.text())}catch(e){st.textContent="That file isn't a valid backup.";return}
     if(!data||data.app!=="my-life-app"||!data.data){st.textContent="That file isn't a backup from this app.";return}
     if(restore.dataset.armed!=="1"){restore.dataset.armed="1";restore.textContent="Tap again to restore";st.textContent="This writes every item from the file back into the app. Items with the same id are replaced.";return}
-    restore.disabled=true;let n=0,fail=0;
-    for(const c of COLLS){for(const d of(data.data[c]||[])){if(!d||!d.id)continue;const ok=await rawSet(c+"/"+d.id,stripId(d));ok?n++:fail++;if(n%20===0)st.textContent=`Restoring… ${n}`}}
-    st.textContent=`Restored ${n} items${fail?`, ${fail} failed`:""}.`;restore.disabled=false;
+    restore.disabled=true;let n=0,fail=0;restoreNote="Restoring… please wait";st.textContent=restoreNote;
+    for(const c of COLLS){for(const d of(data.data[c]||[])){if(!d||!d.id)continue;const ok=await rawSet(c+"/"+d.id,stripId(d));ok?n++:fail++;if(n%20===0){restoreNote=`Restoring… ${n}`;st.textContent=restoreNote}}}
+    restoreNote=`Restored ${n} items${fail?`, ${fail} failed`:""}. Check Today, Shifts and Money.`;st.textContent=restoreNote;document.querySelectorAll(".status").forEach(e=>e.textContent=restoreNote);restore.disabled=false;
   };
   return[h("div",{class:"card"},h("h2",{},"Download a backup"),
       h("div",{class:"meta"},last?`Last backup: ${fmtDay(last)}.`:"No backup yet. Do one every week or two, and keep the file somewhere safe like Google Drive."),

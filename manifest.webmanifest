@@ -1,1 +1,1 @@
-{"name":"My Life App","short_name":"Life","start_url":"./","display":"standalone","background_color":"#f3f5f8","theme_color":"#1f4fd1","icons":[{"src":"icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any"}]}
+{"name":"My Life App","short_name":"Life","start_url":"./","display":"standalone","background_color":"#F7F3EA","theme_color":"#005B52","icons":[{"src":"icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any"}]}

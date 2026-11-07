@@ -1335,7 +1335,7 @@ function viewSettings(){
       const ok2=await wSet("settings/day",{wake:g("set-wake")||DAYDEF.wake,bed:g("set-bed")||DAYDEF.bed,book:g("set-book").trim()||DAYDEF.book,medMins:m,readMins:rd},"Day settings");
       st.textContent=ok1&&ok2&&ok3?"Settings saved.":"";
     }},"Save settings"):null,st);
-  return[body,h("div",{class:"meta"},"Never type card numbers, sort codes or account numbers into this app. Names and balances are enough.")];
+  return[body,h("div",{class:"meta"},"Never type card numbers, sort codes or account numbers into this app. Names and balances are enough."),h("div",{class:"meta"},"App version: 7 Nov, with rent")];
 }
 
 /* =================== MARKETING =================== */

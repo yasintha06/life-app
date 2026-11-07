@@ -353,7 +353,7 @@ const COLLS=["accounts","shifts","payments","loans","entries","tasks","habits","
 const S={};COLLS.forEach(c=>S[c]=[]);
 const loaded=new Set();
 const ready=()=>loaded.size>=COLLS.length;
-let settings={...DEF},dayS={...DAYDEF},budgets={},studyS={done:{},exam:{}};
+let settings={...DEF},dayS={...DAYDEF},rentS={amount:400,card:null,day:15},budgets={},studyS={done:{},exam:{}};
 let db=null,canWrite=true,dirty=false;
 const today=todayStr();
 const TABS=[["today","Today"],["shifts","Shifts"],["money","Money"],["chat","Assistant"],["more","More"]];
@@ -529,6 +529,26 @@ async function rollover(){
   for(const t of S.tasks.filter(t=>t.repeat!=="daily"&&!t.done&&t.date<today)){const{id,...r}=t;await rawSet("tasks/"+id,{...r,date:today,movedFrom:t.movedFrom||t.date})}
 }
 function dayInfo(d){const x=getLocal("days/"+d)||{};return{wake:x.wake||dayS.wake,bed:x.bed||dayS.bed}}
+function rentCard(){
+  if(!(Number(rentS.amount)>0)||!rentS.card||!S.accounts.some(a=>a.id===rentS.card))return null;
+  const ym=today.slice(0,7),day=Math.min(28,Math.max(1,Number(rentS.day)||15));
+  const due=ym+"-"+String(day).padStart(2,"0");
+  if(S.entries.some(e=>e.rentFor===ym))return null;
+  if(today<addDays(due,-3))return null;
+  const rentP=toP(rentS.amount),c=cashAcc(),cashHas=c?Math.max(0,nowP(c.id)):0;
+  const cashPart=Math.min(cashHas,rentP),cardPart=rentP-cashPart;
+  const late=today>due,when=today===due?"Rent is due today":late?`Rent was due ${fmtDay(due)}`:`Rent due ${fmtDay(due)}`;
+  const split=cardPart>0?`${cashPart>0?fmtP(cashPart)+" from cash and ":""}${fmtP(cardPart)} on ${accName(rentS.card)}`:`${fmtP(cashPart)} from cash`;
+  const btn=h("button",{class:"btn",type:"button",disabled:!canWrite,onclick:async()=>{
+    btn.disabled=true;
+    const base={kind:"expense",date:today,cat:"Rent",biz:"Personal",rentFor:ym,note:"Rent "+ym};
+    let ok=true;
+    if(cashPart>0&&c)ok=!!(await wAdd("entries",{...base,amount:cashPart/100,from:c.id},"Rent from cash"));
+    if(ok&&cardPart>0)ok=!!(await wAdd("entries",{...base,amount:cardPart/100,from:rentS.card},"Rent on card"));
+    if(!ok)btn.disabled=false;
+  }},"Pay rent now");
+  return h("div",{class:"card"},h("h2",{},when),h("div",{class:"meta"},`${fmtP(rentP)}: ${split}. Cash now ${fmtP(cashHas)}.`),btn);
+}
 function viewToday(){
   const d=dayView,{wake,bed}=dayInfo(d);
   const sh=S.shifts.filter(s=>s.date===d&&!JOBS[s.job]?.off);
@@ -547,6 +567,7 @@ function viewToday(){
     vtile("Free time",hm(plan.free),`After shifts, travel and tasks`,true),
     vtile("Work",sh.length?hrs(sum(sh.map(shiftHours)))+" h":(off?"Day off":"None"),sh.map(s=>JOBS[s.job].label).join(", ")||null),
     vtile("Tasks",`${doneN} of ${tk.length}`,tk.length?hm(plan.taskM)+" planned":null)));
+  if(d===today){const rc=rentCard();if(rc)out.push(rc)}
   // wake and bed
   const wIn=inp("t-wake",wake,{type:"time","aria-label":"Wake-up time"}),bIn=inp("t-bed",bed,{type:"time","aria-label":"Bed time"});
   if(!canWrite){wIn.disabled=true;bIn.disabled=true}
@@ -1296,6 +1317,10 @@ function viewSettings(){
   const body=h("div",{class:"card"},h("h2",{},"Pay"),
     h("div",{class:"two"},f("set-rate","Sam's rate per hour £",settings.samRate,{inputmode:"decimal"}),f("set-rob","Electrician day £",settings.robDay,{inputmode:"decimal"})),
     f("set-travel","Travel minutes before a shift",settings.travel,{inputmode:"numeric"}),
+    h("h2",{},"Rent"),
+    h("div",{class:"two"},f("set-rent","Monthly rent £",rentS.amount,{inputmode:"decimal"}),f("set-rentday","Due day of month",rentS.day,{inputmode:"numeric"})),
+    field("Pay the rest from card",(()=>{const sel=h("select",{id:"set-rentcard"},h("option",{value:""},"Choose a card"));byKind("card").forEach(a=>{const o=h("option",{value:a.id},a.name);if(a.id===rentS.card)o.selected=true;sel.append(o)});return sel})()),
+    h("div",{class:"meta"},"On the due day Today offers a Pay rent button. It uses cash first and puts the rest on this card."),
     h("h2",{},"Day and habits"),
     h("div",{class:"two"},f("set-wake","Usual wake-up",dayS.wake,{type:"time"}),f("set-bed","Usual bed time",dayS.bed,{type:"time"})),
     f("set-book","Book you're reading",dayS.book,{maxlength:"80"}),
@@ -1303,9 +1328,12 @@ function viewSettings(){
     canWrite?h("button",{class:"btn",type:"button",onclick:async()=>{
       const g=id=>$(id).value,r=num(g("set-rate")),d=num(g("set-rob")),t=num(g("set-travel")),m=num(g("set-med")),rd=num(g("set-read"));
       if(!(r>0)||!(d>0)||!(t>=0)||!(m>0)||!(rd>0)){st.textContent="Check the numbers: they must be above zero.";return}
+      const ra=num(g("set-rent")),rdy=num(g("set-rentday")),rc=$("set-rentcard").value;
+      if(ra!==null&&(!(ra>0)||!(rdy>=1&&rdy<=28)||!rc)){st.textContent="Rent: enter an amount, a due day from 1 to 28, and a card. Or clear the amount.";return}
       const ok1=await wSet("settings/pay",{samRate:r,robDay:d,travel:t},"Pay settings");
+      const ok3=await wSet("settings/rent",ra>0?{amount:ra,day:rdy,card:rc}:{amount:null,day:15,card:null},"Rent settings");
       const ok2=await wSet("settings/day",{wake:g("set-wake")||DAYDEF.wake,bed:g("set-bed")||DAYDEF.bed,book:g("set-book").trim()||DAYDEF.book,medMins:m,readMins:rd},"Day settings");
-      st.textContent=ok1&&ok2?"Settings saved.":"";
+      st.textContent=ok1&&ok2&&ok3?"Settings saved.":"";
     }},"Save settings"):null,st);
   return[body,h("div",{class:"meta"},"Never type card numbers, sort codes or account numbers into this app. Names and balances are enough.")];
 }
@@ -1557,7 +1585,7 @@ render(true);
       S[c]=snap.docs.map(d=>({id:d.id,...d.data()}));
       if(c==="settings"){
         const g=id=>stripId(S.settings.find(x=>x.id===id))||{};
-        settings={...DEF,...g("pay")};dayS={...DAYDEF,...g("day")};budgets=g("budgets");const st=g("study");studyS={done:st.done||{},exam:st.exam||{}};
+        settings={...DEF,...g("pay")};dayS={...DAYDEF,...g("day")};rentS={amount:400,card:null,day:15,...g("rent")};budgets=g("budgets");const st=g("study");studyS={done:st.done||{},exam:st.exam||{}};
       }
       loaded.add(c);if(ready()){render();if(!rolled)rollover()}
     },()=>{loaded.add(c);setStatus("Lost connection to your data. Reload the page.",true);render()});

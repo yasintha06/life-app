@@ -353,7 +353,7 @@ const COLLS=["accounts","shifts","payments","loans","entries","tasks","habits","
 const S={};COLLS.forEach(c=>S[c]=[]);
 const loaded=new Set();
 const ready=()=>loaded.size>=COLLS.length;
-let settings={...DEF},dayS={...DAYDEF},rentS={amount:400,card:null,day:15},budgets={},studyS={done:{},exam:{}};
+let settings={...DEF},dayS={...DAYDEF},rentS={amount:400,card:null,day:15},settleS={from:null},budgets={},studyS={done:{},exam:{}};
 let db=null,canWrite=true,dirty=false;
 const today=todayStr();
 const TABS=[["today","Today"],["shifts","Shifts"],["money","Money"],["chat","Assistant"],["more","More"]];
@@ -529,6 +529,23 @@ async function rollover(){
   for(const t of S.tasks.filter(t=>t.repeat!=="daily"&&!t.done&&t.date<today)){const{id,...r}=t;await rawSet("tasks/"+id,{...r,date:today,movedFrom:t.movedFrom||t.date})}
 }
 function dayInfo(d){const x=getLocal("days/"+d)||{};return{wake:x.wake||dayS.wake,bed:x.bed||dayS.bed}}
+function settleCard(){
+  if(new Date(today+"T12:00:00").getDay()!==3)return null;
+  const cards=byKind("card").map(a=>[a,Math.max(0,nowP(a.id))]).filter(x=>x[1]>0);
+  if(!cards.length)return null;
+  const total=cards.reduce((t,x)=>t+x[1],0);
+  const firstBank=byKind("bank")[0];
+  const src=sel("settle-from",accKeys(["cash","bank"]),settleS.from||(firstBank?firstBank.id:""));
+  const st=h("div",{class:"meta"});
+  const btn=h("button",{class:"btn",type:"button",disabled:!canWrite,onclick:async()=>{
+    const from=src.value;if(!from){st.textContent="Choose where the money comes from.";return}
+    btn.disabled=true;let ok=true;
+    for(const[a,p]of cards){if(ok)ok=!!(await wAdd("entries",{kind:"transfer",date:today,amount:p/100,from,to:a.id,note:"Weekly card payment"},"Paid "+a.name))}
+    if(ok)await wSet("settings/settle",{from});else btn.disabled=false;
+  }},"Pay all cards now");
+  const rows=cards.map(([a,p])=>h("div",{class:"meta"},`${a.name}: ${fmtP(p)}`));
+  return h("div",{class:"card"},h("h2",{},"Wednesday: pay your credit cards"),...rows,h("div",{class:"meta"},`Total ${fmtP(total)}`),field("Pay from",src),btn,st);
+}
 function rentCard(){
   if(!(Number(rentS.amount)>0)||!rentS.card||!S.accounts.some(a=>a.id===rentS.card))return null;
   const ym=today.slice(0,7),day=Math.min(28,Math.max(1,Number(rentS.day)||15));
@@ -567,7 +584,7 @@ function viewToday(){
     vtile("Free time",hm(plan.free),`After shifts, travel and tasks`,true),
     vtile("Work",sh.length?hrs(sum(sh.map(shiftHours)))+" h":(off?"Day off":"None"),sh.map(s=>JOBS[s.job].label).join(", ")||null),
     vtile("Tasks",`${doneN} of ${tk.length}`,tk.length?hm(plan.taskM)+" planned":null)));
-  if(d===today){const rc=rentCard();if(rc)out.push(rc)}
+  if(d===today){const rc=rentCard();if(rc)out.push(rc);const sc=settleCard();if(sc)out.push(sc)}
   // wake and bed
   const wIn=inp("t-wake",wake,{type:"time","aria-label":"Wake-up time"}),bIn=inp("t-bed",bed,{type:"time","aria-label":"Bed time"});
   if(!canWrite){wIn.disabled=true;bIn.disabled=true}
@@ -1147,7 +1164,9 @@ function openLoan(ex){
   const date=inp("l-date",ex?.date||today,{type:"date"}),note=inp("l-note",ex?.note||"",{maxlength:"140"});
   const rep=inp("l-rep","",{inputmode:"decimal",placeholder:"0.00"});
   const accOpts=[["","Don't change my balances"],...accKeys(["cash","bank"])];
-  const acc=sel("l-acc",accOpts,""),repAcc=sel("l-repacc",accOpts,"");
+  let lastAcc=null;try{lastAcc=localStorage.getItem("lastLoanAcc")}catch(e){}
+  const defAcc=lastAcc&&accOpts.some(o=>o[0]===lastAcc)?lastAcc:(cashAcc()?cashAcc().id:"");
+  const acc=sel("l-acc",accOpts,defAcc),repAcc=sel("l-repacc",accOpts,defAcc);
   const rateF=field("Rupees per £1 (optional, for a rough £ value)",rate),accF=field(ex?"":"Money taken from / put into",acc);
   const body=col(field("Person",who),field("Type",dirSel),field("Currency",curSel),field("Amount",amt),rateF,field("Date",date),field("Note (optional)",note));
   if(!ex)body.append(accF);
@@ -1168,6 +1187,7 @@ function openLoan(ex){
     const ok=ex?await wSet("loans/"+ex.id,data,"Lending: "+data.person):(id=await wAdd("loans",data,"Lending: "+data.person));
     if(!ok)return;
     const gbpLoan=curSel.value!=="LKR";
+    if(!ex&&gbpLoan&&acc.value){try{localStorage.setItem("lastLoanAcc",acc.value)}catch(e){}}
     if(!ex&&gbpLoan&&acc.value)await wAdd("entries",{kind:"loan",date:date.value,amount:a,ref:id,[dirSel.value==="lent"?"from":"to"]:acc.value,note:(dirSel.value==="lent"?"Lent to ":"Borrowed from ")+data.person},"Money moved for lending");
     const got=(paid-before)/100;
     if(ex&&gbpLoan&&repAcc.value&&got>0)await wAdd("entries",{kind:"loan",date:today,amount:got,ref:id,[dirSel.value==="lent"?"to":"from"]:repAcc.value,note:(dirSel.value==="lent"?"Repaid by ":"Repaid to ")+data.person},"Repayment moved money");
@@ -1335,7 +1355,7 @@ function viewSettings(){
       const ok2=await wSet("settings/day",{wake:g("set-wake")||DAYDEF.wake,bed:g("set-bed")||DAYDEF.bed,book:g("set-book").trim()||DAYDEF.book,medMins:m,readMins:rd},"Day settings");
       st.textContent=ok1&&ok2&&ok3?"Settings saved.":"";
     }},"Save settings"):null,st);
-  return[body,h("div",{class:"meta"},"Never type card numbers, sort codes or account numbers into this app. Names and balances are enough."),h("div",{class:"meta"},"App version: 7 Nov, with rent")];
+  return[body,h("div",{class:"meta"},"Never type card numbers, sort codes or account numbers into this app. Names and balances are enough."),h("div",{class:"meta"},"App version: 8 Nov, with rent and Wednesday cards")];
 }
 
 /* =================== MARKETING =================== */
@@ -1585,7 +1605,7 @@ render(true);
       S[c]=snap.docs.map(d=>({id:d.id,...d.data()}));
       if(c==="settings"){
         const g=id=>stripId(S.settings.find(x=>x.id===id))||{};
-        settings={...DEF,...g("pay")};dayS={...DAYDEF,...g("day")};rentS={amount:400,card:null,day:15,...g("rent")};budgets=g("budgets");const st=g("study");studyS={done:st.done||{},exam:st.exam||{}};
+        settings={...DEF,...g("pay")};dayS={...DAYDEF,...g("day")};rentS={amount:400,card:null,day:15,...g("rent")};settleS={from:null,...g("settle")};budgets=g("budgets");const st=g("study");studyS={done:st.done||{},exam:st.exam||{}};
       }
       loaded.add(c);if(ready()){render();if(!rolled)rollover()}
     },()=>{loaded.add(c);setStatus("Lost connection to your data. Reload the page.",true);render()});

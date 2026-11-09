@@ -1,4 +1,4 @@
-# My Life App
+# Yasi Life
 
 Shifts and pay, money and credit cards, daily plan and habits, Azure studies, job applications, weekly and monthly reviews.
 A single web page hosted free on GitHub Pages. Data lives in a free Supabase database behind your login.
